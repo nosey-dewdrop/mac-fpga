@@ -2612,3 +2612,152 @@ The port-line fix (check_xdc.py --fix-ports) on eight placements of a comment, 1
   (`31b`'s falling-edge clock too), and a Vivado-style testbench without `$finish`: #6.
 - `dewfpga sim` with two design roots naming `dewfpga bit` in its advice: #12, with top selection.
 - README, README.tr and the cli page still say "46 checks". #6 locks the number.
+
+### #3 · Silent wrongs stop the build · 26–27 September
+
+**In numbers.** A silent wrong is a design that builds a bitstream and does not do what the simulation
+showed: `expect.tsv` rows with bit=pass and netlist=fail. Before #3: 17. After: 2 (`35`, an MMCM, and
+`97`, a block RAM: their netlists have no simulation model, the circuits are right). Of the 15 others, one
+became right (`33`, a PMOD pin tied to `'z` and read back) and 14 stop with an `ERROR` that names the
+student's file and line and says how to fix it; no `.bit` is written. Three probes that used to fail now
+pass all four stages (`26` an array of instances, `33`, `56` a file-scope enum), so the Vivado-supported
+probes passing all four stages went 29/111 → 32/111 and all four stages 30/132 → 33/133 (one probe added,
+`95b`). Synthesis 69/132 → 57/133: the silent wrongs now stop there. Known gaps 87 → 79. `test/run.sh`:
+178 passed before, 187 passed, 0 failed, 79 known gaps after (9 min 10 s). `dewfpga bit` on the blink example: 4.6 s before,
+4.1 s after (three yosys runs instead of one: a preprocessor dump, elaboration, synthesis; measured once each, warm).
+
+**What the student sees.** `test/sv/39_undeclared_name` (a typo, `summ` for `sum`), `dewfpga bit`, before:
+```
+design.sv:4: Warning: Identifier `\summ' is implicitly declared.
+Warning: Wire top.\summ is used but has no driver.
+pnr ok: 0 LUT, 0 FF, no clocked paths, timing not applicable   (full log: top.log)
+top.bit  2.2 MB
+exit 0
+```
+after:
+```
+design.sv:4: Warning: Identifier `\summ' is implicitly declared.
+ERROR: design.sv:4: summ is not declared anywhere and nothing drives it: yosys made it a 1-bit wire stuck at x and built the design without it (dewfpga sim refuses this code). Declare it, or check the spelling (a typo of a declared name).
+exit 2
+```
+`05_two_block_driver` (one register written from two always blocks) printed 22 lines of yosys warnings and
+`top.bit  2.2 MB`, exit 0; now, after the first warning:
+```
+ERROR: design.sv:3 and design.sv:4: cnt is written from two always blocks (design.sv:3 and design.sv:4). Drive each signal from one always block: yosys resolved the conflict to a constant, so the board would not do what the simulation showed.
+```
+and no bitstream. `93_two_roots_file_name` (the plain counter and the board's top in one file named
+`counter.sv`) built the plain counter, `counter.bit  2.2 MB`, exit 0, without a word; now:
+```
+ERROR: 2 modules could be the top (nothing instantiates them): counter, top. Name it:  dewfpga bit counter
+exit 1
+```
+
+**What changed, one mechanism per class.** Product files only: `templates/Makefile` (111 → 252 lines),
+`templates/check_xdc.py` (192 → 318), `bin/dewfpga` (162 → 164).
+- *Undeclared and unresolved names* (`39`, `58`, `22c`, `22d`, `22f`). yosys warns `Identifier ... is
+  implicitly declared` with the file and line, then builds a 1-bit wire with no driver. `-noautowire` was
+  tried first and dropped: it also refuses the legal implicit nets of `76` (a port connection `.y(w)`, a net
+  declaration assignment; IEEE 1800-2017 6.10). Now a plain implicit name is an error only when yosys then
+  says nothing drives it; a dotted name (`u_fsm.state`, `c.q`) is an error unless its prefix is an
+  interface port (`22_interface_modport` keeps building: yosys warns for those while parsing and resolves
+  them in `hierarchy`). The message tells an interface member from a hierarchical name; the interface one
+  says "not supported yet (#4)".
+- *Two always blocks writing one register* (`05`), and a register written by an always block and a
+  continuous assign. yosys' `multiple conflicting drivers` warning names cells, not lines, so the recipe
+  now runs yosys twice: `read_verilog; hierarchy -top; proc; write_rtlil top.il`, then `read_rtlil;
+  synth_xilinx ...`. The awk reads the cells' `src` attributes from `top.il` and prints both lines. A
+  conflict whose drivers have no always-block line (two assigns to a tri bus, `52`) is left to nextpnr's
+  verdict as before.
+- *Async load from a signal* (`03`, `03b`). yosys emulated it with FFs and a mux ("Async reset value ...
+  is not constant!") and `03b`'s netlist was a combinational loop. Any `$aldff` cell left after `proc` is
+  now an error with the always block's line and the fix (load with the clock, or reset to a constant). A
+  reset branch that loads a parameter or a localparam still builds.
+- *`$isunknown` in a design* (`59`). yosys folds it to 1; on the board it is 0. Looked for in the code
+  yosys' preprocessor hands to the parser (`read_verilog -ppdump`), so a `/* */` comment or an
+  `` `ifndef SYNTHESIS `` block does not trigger it (the first version scanned the raw text and refused both;
+  break round 1 found it). `` `file_push``/`` `file_pop`` in the dump keep the file and line of an `` `include``.
+- *A module with ports that calls `$finish`* (`81`) was taken for a testbench, so its submodule was built
+  as the whole design (`counter.bit`, exit 0) and `sim` printed nothing. A testbench is now a module with no
+  ports; `$finish`/`$stop` in a module with ports stops sim and bit at that line (Vivado ignores it, UG901
+  Table 21; yosys stops on it, #4 makes it ignored). Under `` `ifndef SYNTHESIS `` it is allowed (round 2).
+- *Two modules that could be the top* (`93`). The file-name tie-break is gone, and so is sim's
+  "prefer the root a testbench instantiates": sim and bit give the same answer, and stop naming both. The
+  `.xdc`-name preference stays and is printed (`top module: X (named by the .xdc)`).
+- *A declaration initializer that reads inputs* (`37b`, `logic [3:0] sum = sw[3:0] + sw[7:4];`). yosys
+  takes it as the power-up value; the LEDs never follow the switches. The scanner stops at the line and
+  prints `assign sum = ...`. A constant from a `parameter`/`localparam` of any type is a legal start value
+  and builds (round 1 found `localparam int STEP` refused; fixed); a register with such an initializer gets
+  the register-style fix (load it under its reset).
+- *A module defined in two files* (`95b`, new probe: `lab4.sv` and a backup `lab4_old.sv`). Stops naming
+  both files and lines. Vivado column: unverified (no log of that case in the corpus).
+- *A package the tools were not given* (`23c`, `pkg.sv` next to `design.sv`). The CLI hands iverilog and
+  yosys the files that hold a module; a package file is left out, iverilog stops at a syntax error and yosys
+  drops the import and builds every name as an undriven wire. A source scan before either tool names the
+  reference's line, the file that declares the package and the fix (`` `include "pkg.sv" ``); a package
+  declared in a module file that sorts after its user (`zz_util.sv`) is now read first (round 2).
+- *A typedef of a 2-D packed array* (`51c`, `typedef logic [3:0][6:0] tab_t;`) used for a parameter or a
+  net: yosys keeps the value flat and `SEG[i]` picks a bit instead of a row, silently. Stopped at the
+  declaration, with the flat `+:` rewrite yosys accepts; the scan reads `` `include``d files first (round 2).
+- *An inout tied to `'z` and read back* (`33`). yosys kept the constant z as the pin's driver and the read
+  gave z. A z-only driver drives nothing: it is dropped from the elaborated design (`top.il`), and the pin is
+  read like a read-only inout. The netlist now equals the RTL (`EQV PASS: 78674 output bits`).
+- *Stale rebuilds* (found in #2, rounds 1 and 2). `top.json` and `top_sim` now depend on the `.mem` files
+  named by `$readmem`, the files named by `` `include``, and a `.deps` stamp of the file list, so an edited
+  ROM, a changed include, a deleted or renamed testbench and a dropped design file rebuild. Measured with
+  scratch folders before the change: each printed "up to date" or ran the old binary.
+
+**Tried and did not work.** `-noautowire` (above). yosys `check -assert` for the two-block case: it also
+counts the "no driver" warnings legal designs print. `connect -unset` for the `'z` pin: it rewires the read
+too and the LED reads x. A first `.mem` grep pattern with a literal `(` broke make 3.81 ("unterminated call
+to function `sort`"). Parsing `top.il` in the awk's `BEGIN` block read an empty file (the pipe starts awk
+before yosys writes it); it is read lazily now. `hierarchy -check` in the elaboration run refused the UNISIM
+primitives (`34` BUFG, `35` MMCM: "not part of the design"); the check is the synthesis run's, which has the
+cell library. The first two-block rule fired on `52`'s tri bus with "(line unknown)"; a conflict without an
+always-block line is not this error.
+
+**Break rounds.** Two, each a student (up to 10 new designs against the claim) and a regression reader
+(the diff, the 31 protect probes, the legal neighbour of every new rule), then a fix agent per task and an
+integration; then a judge was added to the script for the next updates (this run was made before it). Round
+1: 9 reports, 8 in scope (constant start value from `localparam int` refused; `$isunknown` in a block comment
+and under `` `ifndef SYNTHESIS``; an interface port on its own line refused; the typedef scan firing on a
+comment; `import pkg::*` reported as a typo; always_ff + assign printing "(line unknown)"; sim's two-roots
+message saying `dewfpga bit`). Round 2: 5 reports, 5 in scope (the typedef scan missing an `` `include``d
+`.svh`; `$finish` under `` `ifndef SYNTHESIS``; a package file sorting after its user; a struct member taken
+for a type name; a second "(line unknown)" line in a submodule). All reproduced and fixed, each with the
+legal neighbour re-run. Held in both rounds: undeclared names in a `.v` submodule, hierarchical names two
+levels deep and into a generate block, two `always_ff` on the same edge in a parameterised submodule, an
+active-low async load in a `.v` file, `$isunknown` in an included function, start-value spellings in `reg`,
+typedef'd and parameterised forms, two roots across `.v` and `.sv`, two `always_ff` writing different bits of
+one vector (builds), a reset branch loading a parameter (builds), dotted names of a packed struct (builds).
+
+**Tests.** `test/sv/run.sh` on the 16 target rows: each row's stages and its `today` quotes were rewritten
+to what the product prints (the runner fails a quote no stage printed). Two runner checks changed because
+the product changed: "a new silent wrong fails with any yosys" plants its wrong row on `97` (it used `05`,
+which the product now refuses), and the personal-path scan skips the gitignored `.claude/` folder (the
+workflow's worktrees live there). The full suite ran three times in the main session: the first run found the
+`34`/`35`/`52` regressions above and the `26`/`56` gains; the second failed only on `22b`'s stale quote (its
+message changed: the interface scan now reads every `.sv` in the folder, not only the module files, so an
+interface in its own file is classed as an interface, and the row quotes what yosys then prints); the third
+is the line quoted in the numbers.
+
+**Found and left to later updates.**
+- #4: interfaces used from the instantiating module (`22c`, `22d`, `22f`) and hierarchical names (`58`)
+  compile; `$finish` in a design ignored as Vivado does (`81`); `59` `$isunknown` as 0. `12b`'s named
+  assignment pattern refused by iverilog and yosys (the judge-less round 2 hit it). `52`/`70`'s cells.
+- #5: `22f` prints 32 "no driver" warnings after its three ERRORs; the ERROR for `39` prints before the two
+  warnings it is derived from; `26`'s and `58`'s messages have no error code yet; the sim message for two
+  roots says `dewfpga bit <name>` (it works for sim too).
+- #6: the `.deps` stamps and `top.il` are new build outputs (`dewfpga clean` removes them; a student's
+  `.gitignore` does not know them); a stray `.svh` not `` `include``d but declaring a 2-D typedef of the same
+  name as a 1-D one would trip the typedef scan (no probe has it); `.mem` and `` `include`` dependencies are
+  one level deep.
+- Not verified (DOĞRULANMADI): whether Vivado orders a package file before its user on its own (UG901 does
+  not say; the product now orders it); Vivado's exact behaviour on `39` (no corpus log; the message states
+  the IEEE rule).
+
+**Orchestration, for the record.** One workflow: 3 build agents in their own worktrees, one integrator,
+2 breakers × 2 rounds, up to 3 fix agents per round, 14 agents in 3 h 0 min, then the harness killed the
+last integrator (a 20-probe run is silent for more than 3 minutes; it had already applied both fixes).
+Lessons written into the script: at most 5 probes per call, fix agents copy the integrated product into
+their worktree first (each spent 10 minutes discovering that their worktree was at HEAD), one scratch folder
+per agent (two overwrote each other's repro), a judge with a reproduced criticism before the close.

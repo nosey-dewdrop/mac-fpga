@@ -28,7 +28,7 @@ check "shellcheck"            "shellcheck -S style '$ROOT/install.sh' '$CLI' '$R
 check "bash -n"               "bash -n '$ROOT/install.sh' && bash -n '$CLI'"
 # every file is scanned, this one too: a home folder is /Users/ and a name (/Users/you/ is the guide's placeholder).
 # This file writes the pattern with no name after /Users/, and its planted paths through printf's %s
-personal_paths() { grep -rnoE '/Users/[A-Za-z0-9._-]+/?' --exclude-dir=.git --exclude-dir=.rabadon --exclude-dir=node_modules --exclude=.fpga_home "$1" | grep -vE ':/Users/you/?$'; }
+personal_paths() { grep -rnoE '/Users/[A-Za-z0-9._-]+/?' --exclude-dir=.git --exclude-dir=.rabadon --exclude-dir=.claude --exclude-dir=node_modules --exclude=.fpga_home "$1" | grep -vE ':/Users/you/?$'; }
 check "no personal paths"     "! personal_paths '$ROOT' | grep -q ."
 check "personal-path check sees test/sv/run.sh" "mkdir -p '$T/pp/test/sv' && printf '# /Users/%s/fpga\\n' someone > '$T/pp/test/sv/run.sh' && personal_paths '$T/pp' | grep -q 'test/sv/run.sh'"
 check "personal-path check sees test/run.sh" "printf '# built on /Users/%s/fpga\\n' someone > '$T/pp/test/run.sh' && personal_paths '$T/pp' | grep -q 'test/run.sh:1:'"
@@ -184,11 +184,12 @@ st_stale() {
     && iverilog -o "$T/svr/test/sv/09_always_procs/top_sim" "$T/svr/stale.sv" \
     && svrun 09_always_procs && grep -qE 'BAD +09_always_procs +rtl fail' "$T/svr/out"
 }
-# 05 recorded as refused, under a yosys that is not the measured one: it builds a bitstream and its netlist fails
+# 97 recorded as refused, under a yosys that is not the measured one: it builds a bitstream and its netlist fails
+# (05 was the case until #3 made the product refuse it)
 st_silent() {
     svcopy && echo 0.0-other > "$T/svr/test/golden/yosys-version" \
-    && setrow 05_two_block_driver 6 fail && setrow 05_two_block_driver 7 - && setrow 05_two_block_driver 8 fail \
-    && svrun 05_two_block_driver && grep -q 'a new silent wrong' "$T/svr/out"
+    && setrow 97_ram_style_block 6 fail && setrow 97_ram_style_block 7 - && setrow 97_ram_style_block 8 fail \
+    && svrun 97_ram_style_block && grep -q 'a new silent wrong' "$T/svr/out"
 }
 st_unexpected() { svcopy && setrow 07_enum_packed_array 7 fail && svrun 07_enum_packed_array && grep -q 'netlist pass, expected fail' "$T/svr/out"; }
 st_nosource()   { svcopy && setrow 26_inst_array 4 '' && svrun 26_inst_array && grep -q 'malformed rows' "$T/svr/out"; }

@@ -97,19 +97,20 @@ cmd_build() {  # <target> [top]
     done
     [ ${#files[@]} -gt 0 ] || die "no .sv or .v file in $PWD. cd into the folder with your design, or start one:  dewfpga new blink"
     # what is what: the scanner reads the modules. The top is the design module nothing else instantiates
-    # (or the one named on the command line, by module or by file); a testbench is a module without ports
-    # or one that calls $finish; file names are free. One ERROR= line means it could not decide.
+    # (or the one named on the command line, by module or by file); a testbench is a module without ports;
+    # file names are free, and never decide the top. One ERROR= line means it could not decide; PROBLEM=
+    # lines are the student's mistakes it saw (a $finish in a design, a start value meant as a wire, a
+    # module defined twice, an instance without a name).
     local xn="" py="$FPGA_HOME/venv/bin/python"; [ -x "$py" ] || py=python3
     for f in *.xdc; do [ -f "$f" ] && xn="$xn,${f%.xdc}"; done
-    local scan line design="" tb="" auto=0 problems=0
-    local ptb=""; [ "$target" = sim ] && ptb=--prefer-tb
-    # shellcheck disable=SC2086
-    scan=$("$py" "$HERE/templates/check_xdc.py" --scan ${top:+--top "$top"} --xdc "${xn#,}" $ptb "${files[@]}") || true
+    local scan line design="" tb="" auto=0 problems=0 why=""
+    scan=$("$py" "$HERE/templates/check_xdc.py" --scan ${top:+--top "$top"} --xdc "${xn#,}" "${files[@]}") || true
     while IFS= read -r line; do
         case $line in
             ERROR=*)   die "${line#ERROR=}" ;;
             PROBLEM=*) echo "ERROR: ${line#PROBLEM=}" >&2; problems=1 ;;
             TOP=*)     top=${line#TOP=} ;;
+            WHY=*)     why=${line#WHY=} ;;
             DESIGN=*)  design=${line#DESIGN=} ;;
             TB=*)      tb=${line#TB=} ;;
             AUTO=*)    auto=${line#AUTO=} ;;
@@ -117,7 +118,8 @@ cmd_build() {  # <target> [top]
     done <<< "$scan"
     [ $problems -eq 0 ] || exit 1
     [ -n "$top" ] || die "could not find a top module in ${files[*]}"
-    [ "$auto" = 1 ] && [ "$(wc -w <<< "$design")" -gt 1 ] && echo "top module: $top"
+    if [ -n "$why" ]; then echo "top module: $top ($why)"
+    elif [ "$auto" = 1 ] && [ "$(wc -w <<< "$design")" -gt 1 ]; then echo "top module: $top"; fi
     local srcs=(); read -ra srcs <<< "$design"
     xdc="$top.xdc"
     case $target in
